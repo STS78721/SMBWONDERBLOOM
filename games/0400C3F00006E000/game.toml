@@ -1,0 +1,11 @@
+# Mario Kart World. Read by tools/build_game.py (link) and mirrored in runtime/game_profile.c (quirks).
+short_name = "mkw"
+display_name = "Mario Kart World"
+ini = "mkw.ini"
+quirks = ["MKW_HEAP_FALLBACK", "MKW_VTABLES"]
+
+[link]
+# Lifted functions the runtime replaces with __wrap_<name> (runtime/ov_system.c): heap, camera and delegate checks
+wrap = ["f_70003f24c0", "f_7000d32270", "f_7000d31b20", "f_7000cdc2f0", "f_70005e10a0", "f_70003f2d70",
+        "f_700087b9b0", "f_700025a680", "f_70006cec80", "f_70006d2800", "f_70006f9c50", "f_70001a6e80",
+        "f_7000192d60"]

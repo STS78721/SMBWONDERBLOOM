@@ -1,0 +1,2 @@
+/* The icon of the MTF setup helper executable: runtime/mtf.ico. Compiled with windres/llvm-windres -I runtime. */
+1 ICON "mtf.ico"

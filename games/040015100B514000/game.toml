@@ -1,0 +1,5 @@
+# Super Mario Bros. Wonder – Nintendo Switch 2 Edition (+ Meetup in Bellabel Park). Program 040015100B514001.
+# First title brought up on the universal path (docs/UNIVERSAL_TOOL.md): no game-specific code yet.
+short_name = "smbw"
+display_name = "Super Mario Bros. Wonder"
+ini = "smbw.ini"

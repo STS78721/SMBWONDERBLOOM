@@ -1,0 +1,5 @@
+# Donkey Kong Bananza (1.0.0)
+short_name = "dkb"
+display_name = "Donkey Kong Bananza"
+ini = "dkb.ini"
+quirks = ["PT_BR"]

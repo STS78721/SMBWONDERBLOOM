@@ -1,0 +1,4 @@
+# The Legend of Zelda: Ocarina of Time (Switch 2). The MasterSword port uses Hookshot's own lifter (nx2/), not this one.
+short_name = "oot"
+display_name = "Zelda: Ocarina of Time (Switch 2)"
+ini = "oot.ini"

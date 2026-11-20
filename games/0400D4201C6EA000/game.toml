@@ -1,0 +1,12 @@
+# Mario Tennis Fever (1.1.1)
+short_name = "mtf"
+display_name = "Mario Tennis Fever"
+ini = "mtf.ini"
+quirks = ["MTF_WORKER_ARGS", "NO_RU"]
+resource = "mtf"          # runtime/mtf.rc: the exe's icon and manifest
+runtime_lib = "libmtfrt.a"
+xlate_names = ["ns2_xlate"]
+
+[link]
+# Internal frame lines (runtime/resolution.c __wrap_f_700205e8fc); only when subsdk0 is linked
+wrap_if_module = { subsdk0 = ["f_700205e8fc"] }

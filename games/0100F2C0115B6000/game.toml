@@ -1,0 +1,5 @@
+# The Legend of Zelda: Tears of the Kingdom (the engine's origin, TotK Recomp)
+short_name = "totk"
+display_name = "Zelda: Tears of the Kingdom"
+ini = "totk.ini"
+quirks = ["TOTK_PATCH_RES"]

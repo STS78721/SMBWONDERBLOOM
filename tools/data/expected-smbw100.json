@@ -1,0 +1,15 @@
+{
+  "_comment": "Super Mario Bros. Wonder (1.0.0) ExeFS. Hashes only; no game data.",
+  "short_name": "smbw",
+  "display_name": "Super Mario Bros. Wonder",
+  "title_id": "040015100B514001",
+  "display_version": "1.0.0",
+  "release_repo": "STS78721/SMBWONDERBLOOM",
+  "exefs_sha256": {
+    "main": "bb9a12d0b028fbba14550ecb58d5e287396bb96d5f5c11c01e9fdde3b6aeb0d7",
+    "main.npdm": "e12d348dbb4bbead82dacb991855c5dbfe88fbfb97ddfd5bd424085f3a38d468",
+    "rtld": "df78a9a923dacee33846fad54f0fad199155b7a150fd40aad31cd2652debc22f",
+    "sdk": "dd1afa0c9ba76713de73514b243c34c572cd3a993251f39526e595c187a4cb69",
+    "subsdk0": "0da6c704e89de6238fa1d9fe68769e2881a174815d9568b4a95acfe15bab0ec2"
+  }
+}

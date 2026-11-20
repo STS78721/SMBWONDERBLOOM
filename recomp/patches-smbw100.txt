@@ -1,0 +1,27 @@
+# Code patches for Super Mario Bros. Wonder – Nintendo Switch 2 Edition (base, program 040015100B514001) main
+# (recomp/patches.py). Each original word is checked against main.
+set fps60 NS2_FPS60 1
+
+# 60 fps: the engine's adaptive frame-rate controller (main+0x1bbee0, called each frame) turns the measured frame time
+# into vsyncs needed: toint(seconds * 60 + tolerance), interval = clamp(that + 1, min 1, max 2), frame rate = 60 /
+# interval. On a PC the measured time includes the host's pacing to the frame limit (~16.5 ms at 60 fps), so it always
+# chose interval 2 and a 30 fps step while the host presented at 60: the game ran at double speed (measured 2026-11-20:
+# meas 16.3-16.6 ms, tol 0.05, interval 2, rate 30). With the set on (any frame limit but 30; runtime/frame_rate.c
+# frame_limit_live) vsyncs needed is 0, so the interval stays 1 and the game steps 1/60 s per frame, as on the console.
+site fps60 main 1bbf64 1e380009 2a1f03e9   # fcvtzs w9, s0 -> mov w9, wzr (vsyncs needed = 0)
+
+# Real-time step (90 and 120 fps without a faster game). Right after the controller call (main+0x1bb9cc) the engine
+# turns the controller's rate (ctrl+0x50, 60 / interval) into its VFR step, in 60 Hz frames, at main+0x3aac460:
+# 60.0 / rate (1.0 at 60 fps, 2.0 at 30). With the set on it reads the measured step instead: page +0 holds seconds * 30
+# (runtime/frame_rate.c frame_step_present), doubled to seconds * 60 (1.0 at 60 fps, 0.667 at 90, 0.5 at 120).
+# OFF by default (2026-11-20): with it on, 90 and 120 fps hold their rate, but the menus (and likely other per-frame
+# code) still count whole frames, so they ran faster: at the same wall time the 90 / 120 runs were a screen further
+# than the 60 run. The global this patches has one other direct reader (f_7000026410). The rest of the game's per-frame
+# time comes from elsewhere. NS2_VFR_REALTIME=1 turns it on for testing (its own switch: the global REALTIME default is 1 for TotK); the runtime allows limits above 60 only while it
+# is on (runtime/frame_rate.c frame_step_cap_ns).
+set realtime NS2_VFR_REALTIME 0
+site realtime main 1bb9d0 bd42aa60 @page:x9   # ldr s0, [x19, #0x2a8] (rate) -> adrp x9, page
+site realtime main 1bb9d4 52a84e08 bd400120   # mov w8, #60.0 -> ldr s0, [x9] (seconds * 30)
+site realtime main 1bb9dc 1e270101 1e202800   # fmov s1, w8 -> fadd s0, s0, s0 (seconds * 60)
+site realtime main 1bb9e8 5e21d800 d503201f   # scvtf s0, s0 -> nop
+site realtime main 1bb9ec 1e201820 d503201f   # fdiv s0, s1, s0 -> nop

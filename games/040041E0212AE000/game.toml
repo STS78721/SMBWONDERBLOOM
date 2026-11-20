@@ -1,0 +1,8 @@
+# Fast Fusion (1.0.0)
+short_name = "ff"
+display_name = "Fast Fusion"
+ini = "ff.ini"
+
+[link]
+# Resolution hooks (runtime/resolution.c). The ff-res-fix branch replaces f_7000075cc0 and adds five more.
+wrap = ["f_700011ff04", "f_700011ff1c", "f_7000075cc0"]
