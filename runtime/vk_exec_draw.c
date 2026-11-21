@@ -31,6 +31,7 @@
 #include "tex.h"
 #include "vk.h"
 #include "vk_exec.h"
+#include "vk_loop_guard.h"
 #include "platform/platform.h"
 
 #define MAX_BINDINGS 128
@@ -41,7 +42,8 @@ static const uint32_t (*c0_push)[NVN2_ROOT_WORDS];
 #define MAX_DESC 1024
 #define CHUNK_BYTES (4u << 20)
 #define ZERO_BYTES 1048576u   // 1 MiB dummy buffer (was 64 KiB) to safely absorb unbacked/out-of-bounds GPU buffer stores
-#define SUPPORT_BYTES 1408u   // Ryujinx SupportBuffer (std140): alpha_test, is_bgra[8], viewport_inverse, viewport_size, ...
+#define SUPPORT_BYTES 1424u   // Ryujinx SupportBuffer (std140): alpha_test, is_bgra[8], viewport_inverse, viewport_size, ...;
+                              // then the loop guard's report address at 1408 (spirv_loop_guard.h)
 #define NVN_STAGE_VS 0
 #define NVN_STAGE_FS 1
 #define NVN_STAGE_GS 2
@@ -2121,6 +2123,8 @@ static void support_fill(uint8_t *b, float w, float h, float point_size) {
     const float one = 1.0f;
     memcpy(b + 1392, &point_size, 4);   // point_size (translator patch 0008): vertex shaders that write none output it
     for (int i = 0; i < 73; i++) memcpy(b + 192 + 16 * i, &one, 4);   // render scale 1: the host renders at guest size
+    uint64_t guard = vk_loop_guard_address();   // guarded shaders that reach their loop cap report there (vk_loop_guard.c)
+    memcpy(b + LOOP_GUARD_SUPPORT_OFFSET, &guard, 8);
 }
 
 // TOTK_BIND_STATS=1: bindings and descriptors per draw of each stage (Task 2.2's choice of the pushed stage), and how

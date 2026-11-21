@@ -84,9 +84,24 @@ class _Inputs:
     destination: Path
 
 
+_CLOUD_TAG_MASK = 0xFFFF0FFF
+_CLOUD_TAG_BASE = 0x9000001A
+_ONEDRIVE_TAG = 0x80000021
+_PYTHON_ENV_KEYS = {"PYTHONHOME", "PYTHONPATH", "PYTHONUSERBASE", "PYTHONSTARTUP"}
+
+
+def _is_cloud_sync_tag(st: os.stat_result) -> bool:
+    tag = getattr(st, "st_reparse_tag", 0)
+    return bool(tag) and (((tag & _CLOUD_TAG_MASK) == _CLOUD_TAG_BASE) or tag == _ONEDRIVE_TAG)
+
+
 def _is_reparse(st: os.stat_result) -> bool:
+    if stat.S_ISLNK(st.st_mode):
+        return True
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & reparse_flag)
+    if not (getattr(st, "st_file_attributes", 0) & reparse_flag):
+        return False
+    return not _is_cloud_sync_tag(st)
 
 
 def _path_without_reparse(value: str | os.PathLike[str], label: str) -> Path:
@@ -294,8 +309,10 @@ def _run_command(command: list[str], *, cwd: Path, phase: str, inputs: _Inputs,
                  callback: ProgressCallback | None, cancel_event: Any) -> None:
     _check_cancelled(cancel_event, phase)
     _emit(callback, WorkflowProgress(phase, "started", message=f"Starting {phase}"))
+    env = {k: v for k, v in os.environ.items() if k.upper() not in _PYTHON_ENV_KEYS}
     kwargs: dict[str, Any] = {
         "cwd": str(cwd),
+        "env": env,
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
@@ -521,6 +538,81 @@ def _check_romfs_tree(root: Path, cancel_event: Any) -> None:
         raise NupWorkflowError("extract", "The RomFS folder is empty. Choose your extracted game folder.")
 
 
+def _require_dir(path: Path, label: str) -> None:
+    try:
+        st = path.lstat()
+    except OSError as exc:
+        raise NupWorkflowError("extract", f"{label} is unavailable: {path} ({exc})") from None
+    if _is_reparse(st) or not stat.S_ISDIR(st.st_mode):
+        raise NupWorkflowError("extract", f"{label} must be a regular folder: {path}")
+
+
+def _is_regular_file(path: Path) -> bool:
+    try:
+        st = path.lstat()
+    except OSError:
+        return False
+    if _is_reparse(st):
+        raise NupWorkflowError("extract", f"Game folder contains a link or special file: {path}")
+    return stat.S_ISREG(st.st_mode)
+
+
+def _stage_addons(source: Path, dump_dir: Path, inputs: _Inputs, packer: Path,
+                  callback: ProgressCallback | None, cancel_event: Any) -> None:
+    """Copy pre-packed add-ons or pack loose aoc/<index>/romfs trees into dump_dir."""
+    aoc_dir = source / "aoc"
+    aoc_packed_dir = source / "aoc_packed"
+    has_aoc = os.path.lexists(aoc_dir)
+    has_aoc_packed = os.path.lexists(aoc_packed_dir)
+    if not has_aoc and not has_aoc_packed:
+        return
+    if has_aoc:
+        _require_dir(aoc_dir, "Add-on content folder")
+    if has_aoc_packed:
+        _require_dir(aoc_packed_dir, "Packed add-on content folder")
+
+    indices: set[str] = set()
+    for base_dir in (aoc_packed_dir if has_aoc_packed else None, aoc_dir if has_aoc else None):
+        if base_dir is None:
+            continue
+        for entry in base_dir.iterdir():
+            if entry.name.isdigit():
+                indices.add(entry.name)
+
+    for idx in sorted(indices, key=int):
+        _check_cancelled(cancel_event, "extract")
+        packed_src = aoc_packed_dir / idx if has_aoc_packed else None
+        packed_ok = False
+        if packed_src is not None and os.path.lexists(packed_src):
+            _require_dir(packed_src, f"Packed add-on {idx} folder")
+            if _is_regular_file(packed_src / "index.json") and _is_regular_file(packed_src / "romfs.bin"):
+                packed_dst = dump_dir / "aoc_packed" / idx
+                packed_dst.mkdir(parents=True, exist_ok=True)
+                for name in ("index.json", "romfs.bin"):
+                    _copy_game_file(packed_src / name, packed_dst / name, cancel_event)
+                # tools/universal_ns2_to_pc.py:_install_addons iterates aoc/<index>/romfs
+                # and reuses matching dump_dir/aoc_packed/<index>.
+                (dump_dir / "aoc" / idx / "romfs").mkdir(parents=True, exist_ok=True)
+                packed_ok = True
+
+        if packed_ok or not has_aoc:
+            continue
+        loose_idx = aoc_dir / idx
+        if not os.path.lexists(loose_idx):
+            continue
+        _require_dir(loose_idx, f"Add-on {idx} folder")
+        addon_romfs = loose_idx / "romfs"
+        if not os.path.lexists(addon_romfs):
+            continue
+        _require_dir(addon_romfs, f"Add-on {idx} RomFS folder")
+        _check_romfs_tree(addon_romfs, cancel_event)
+        packed_dst = dump_dir / "aoc_packed" / idx
+        pack_cmd = [str(inputs.build_python), str(packer), "--dir", str(addon_romfs), "--out", str(packed_dst)]
+        _run_command(pack_cmd, cwd=inputs.repo_root, phase="extract", inputs=inputs,
+                     callback=callback, cancel_event=cancel_event)
+        (dump_dir / "aoc" / idx / "romfs").mkdir(parents=True, exist_ok=True)
+
+
 def run_folder_workflow(game_folder: str | os.PathLike[str],
                         workspace: str | os.PathLike[str],
                         destination: str | os.PathLike[str], *,
@@ -555,7 +647,6 @@ def run_folder_workflow(game_folder: str | os.PathLike[str],
             packed.mkdir()
             for name in ("index.json", "romfs.bin"):
                 _copy_game_file(romfs / name, packed / name, cancel_event)
-            _emit(progress_callback, WorkflowProgress("extract", "completed", message="Game files prepared"))
         else:
             _check_romfs_tree(romfs, cancel_event)
             pack_cmd = [str(inputs.build_python), str(packer), "--dir", str(romfs), "--out", str(packed)]
@@ -564,6 +655,9 @@ def run_folder_workflow(game_folder: str | os.PathLike[str],
             if (romfs / ".nrr").is_dir():
                 # The builder uses the directory's presence to detect runtime modules in the packed image.
                 (packed / ".nrr").mkdir()
+        _stage_addons(source, dump_dir, inputs, packer, progress_callback, cancel_event)
+        if has_packed_image:
+            _emit(progress_callback, WorkflowProgress("extract", "completed", message="Game files prepared"))
     except OSError as exc:
         raise NupWorkflowError("extract", f"Could not prepare the game folder: {exc}") from None
 

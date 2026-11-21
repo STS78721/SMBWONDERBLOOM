@@ -624,7 +624,7 @@ def selftest(shots: Path | None = None) -> int:
         app.destination_var.set(r'D:\Games\Wonder')
         app.progress = WorkflowProgress('extract', 'progress', 42, 100, 'files')
         app.result = SimpleNamespace(install_result=SimpleNamespace(
-            game_title='Super Mario Bros. Wonder', game_version='1.0.0', port_version='Alpha 0.1.0a'))
+            game_title='Super Mario Bros. Wonder', game_version='1.0.0', port_version='0.2.0'))
         app.failure_phase = 'build'
         app.failure_message = 'Sample setup error.'
         if shots:

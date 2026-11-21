@@ -105,9 +105,23 @@ _WARMUP_DATA = Path(__file__).resolve().parents[1] / "tools" / "data"
 SHADER_WARMUP_ROUTES = {"040015100B514001": ("1.0.0", 105)}
 
 
+_CLOUD_TAG_MASK = 0xFFFF0FFF
+_CLOUD_TAG_BASE = 0x9000001A
+_ONEDRIVE_TAG = 0x80000021
+
+
+def _is_cloud_sync_tag(st: os.stat_result) -> bool:
+    tag = getattr(st, "st_reparse_tag", 0)
+    return bool(tag) and (((tag & _CLOUD_TAG_MASK) == _CLOUD_TAG_BASE) or tag == _ONEDRIVE_TAG)
+
+
 def _is_reparse(st: os.stat_result) -> bool:
+    if stat.S_ISLNK(st.st_mode):
+        return True
     reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & reparse)
+    if not (getattr(st, "st_file_attributes", 0) & reparse):
+        return False
+    return not _is_cloud_sync_tag(st)
 
 
 def _lstat(path: Path, what: str) -> os.stat_result:
@@ -195,12 +209,14 @@ def _check_blocked(value: str) -> None:
         raise LocalBuildError(f"Manifest includes a cache path: {value}")
     if name in _ROM_NAMES or _EXEFS_FILE.fullmatch(name):
         raise LocalBuildError(f"Manifest includes a raw game module or ROM image: {value}")
-    aoc_romfs = len(parts) == 2 and _AOC_DIR.fullmatch(parts[0]) and name == "romfs.bin"
+    in_aoc_dir = len(parts) == 2 and bool(_AOC_DIR.fullmatch(parts[0]))
+    aoc_romfs = in_aoc_dir and name == "romfs.bin"
+    aoc_index = in_aoc_dir and name == "aoc-index.bin"
     if name == "romfs.bin" and not aoc_romfs:
         raise LocalBuildError(f"Manifest includes a raw RomFS image outside a recognized AOC folder: {value}")
     if suffix in _BLOCKED_SUFFIXES:
         raise LocalBuildError(f"Manifest includes a blocked settings, build, archive, or ROM/container file: {value}")
-    if suffix == ".bin" and not aoc_romfs and not (len(parts) == 1 and name in _ALLOWED_RUNTIME_BINS):
+    if suffix == ".bin" and not (aoc_romfs or aoc_index) and not (len(parts) == 1 and name in _ALLOWED_RUNTIME_BINS):
         raise LocalBuildError(f"Manifest includes an unrecognized binary cache or game-data file: {value}")
     if suffix in _IMAGE_SUFFIXES and not (in_patch_tree or (len(parts) == 1 and name == "launcher_icon.png")):
         raise LocalBuildError(f"Manifest includes an image that may be cover art or a screenshot: {value}")
@@ -423,6 +439,32 @@ def _safe_installed_relative(value: object) -> str:
     return _safe_relative(value)
 
 
+def _existing_target(destination: Path, relative: str) -> Path | None:
+    """Return an existing file target in destination, or None if it or any parent is missing."""
+    current = destination
+    parts = relative.split("/")
+    for part in parts[:-1]:
+        current /= part
+        try:
+            st = current.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise LocalBuildError(f"Cannot inspect destination folder {current}: {exc}") from None
+        if _is_reparse(st) or not stat.S_ISDIR(st.st_mode):
+            raise LocalBuildError(f"Destination path contains a reparse point or non-folder: {current}")
+    target = current / parts[-1]
+    try:
+        st = target.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise LocalBuildError(f"Cannot inspect destination file {target}: {exc}") from None
+    if _is_reparse(st) or not stat.S_ISREG(st.st_mode):
+        raise LocalBuildError(f"Destination target is not a regular file: {target}")
+    return target
+
+
 def _target_path(destination: Path, relative: str, *, create: bool = False,
                  created_dirs: list[Path] | None = None) -> Path:
     current = destination
@@ -572,13 +614,13 @@ def install_local_build(build_dir: str | os.PathLike[str], destination: str | os
             raise LocalBuildError("Destination is marked for a different game")
         if previous is not None:
             # Never overwrite an unowned path in an existing destination.
+            backup_total = 0
             for relative in installed_files:
-                target = _target_path(dest, relative)
-                if target.exists() and relative.casefold() not in owned:
-                    raise LocalBuildError(f"Refusing to replace a file not recorded by this installer: {relative}")
-            backup_total = sum(_lstat(_target_path(dest, relative), "owned destination file").st_size
-                               for relative in installed_files
-                               if _target_path(dest, relative).exists())
+                target = _existing_target(dest, relative)
+                if target is not None:
+                    if relative.casefold() not in owned:
+                        raise LocalBuildError(f"Refusing to replace a file not recorded by this installer: {relative}")
+                    backup_total += _lstat(target, "owned destination file").st_size
         is_empty_install = previous is None
     else:
         previous, owned = None, set()

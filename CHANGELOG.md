@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.0 · 2026-11-21
+
+WonderBloom **0.2.0** promotes the Windows port from Alpha to a full release, resolving installer failures with add-on content and in-place updates alongside gameplay stability and display fixes.
+
+### Fixed
+
+- Fixed setup failing with `Manifest includes an unrecognized binary cache or game-data file: aoc-1/aoc-index.bin` when installing `.nup` packages or prepared builds that include add-on content.
+- Fixed game-folder installs silently skipping add-on content (`aoc/` and `aoc_packed/`).
+- Fixed updating an existing install failing when a newer version adds files inside a new subfolder (such as `aoc-1/`).
+- Accepted Windows OneDrive-synced folders in setup without misidentifying them as symbolic links, and isolated the bundled setup Python from host `PYTHONPATH`/`PYTHONHOME` settings.
+- Fixed GPU crashes when deflecting projectiles as Elephant Mario on NVIDIA graphics cards (`FIX_SABS_MINMAX=auto` safely lowers integer `SAbs`/`SMin`/`SMax` select patterns at pipeline creation).
+- Fixed mid-level freezes and graphics driver resets caused by unbounded shader loops by enforcing a safe shader loop guard (`vk: loop guard:` logged when triggered).
+- Fixed `fullscreen = 1` starting in windowed mode instead of launching fullscreen.
+
+### Changed
+
+- Promoted WonderBloom from Alpha `0.1.0a` to full release `0.2.0`.
+
 ## 0.1.0a Alpha · 2026-11-21
 
 The first WonderBloom release runs Super Mario Bros. Wonder **1.0.0** on the **SteelTemple Universal NS2 Engine**. The launcher and F1 menu show the game version and the PC build label **Alpha 0.1.0a** separately.

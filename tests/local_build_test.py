@@ -46,9 +46,9 @@ class LocalBuildTest(unittest.TestCase):
     def write_build(self, *, game_id="synthetic.game", game_version="1.0.0", port_version="0.1.0",
                     files=None, extra_files=()):
         files = files or ["app.exe", "runtime/SDL3.dll", "launcher_icon.png", "romfs-index.bin",
-                          "aoc-index.bin", "aoc-1/romfs.bin", "seed-answers.bin", "seed-programs.bin",
-                          "shader-answers.bin", "shader-programs.bin", "shader-prepared.bin",
-                          "romfs-patches/manifest.tsv"]
+                          "aoc-index.bin", "aoc-1/aoc-index.bin", "aoc-1/romfs.bin", "seed-answers.bin",
+                          "seed-programs.bin", "shader-answers.bin", "shader-programs.bin",
+                          "shader-prepared.bin", "romfs-patches/manifest.tsv"]
         (self.source / "runtime").mkdir(exist_ok=True)
         for relative in files:
             path = self.source.joinpath(*relative.split("/"))
@@ -92,6 +92,7 @@ class LocalBuildTest(unittest.TestCase):
         self.assertTrue((self.dest / "runtime/SDL3.dll").is_file())
         self.assertTrue((self.dest / "launcher_icon.png").is_file())
         self.assertTrue((self.dest / "romfs-index.bin").is_file())
+        self.assertTrue((self.dest / "aoc-1/aoc-index.bin").is_file())
         self.assertTrue((self.dest / "aoc-1/romfs.bin").is_file())
         self.assertEqual((self.dest / "exefs/main").read_bytes(), b"synthetic main module")
         self.assertEqual((self.dest / "exefs/sdk").read_bytes(), b"synthetic sdk module")
@@ -102,11 +103,11 @@ class LocalBuildTest(unittest.TestCase):
         marker = json.loads((self.dest / MARKER_NAME).read_text(encoding="utf-8"))
         self.assertEqual(marker["game_id"], "synthetic.game")
         self.assertEqual(marker["files"], ["app.exe", "runtime/SDL3.dll", "launcher_icon.png", "romfs-index.bin",
-                                           "aoc-index.bin", "aoc-1/romfs.bin", "seed-answers.bin",
-                                           "seed-programs.bin", "shader-answers.bin", "shader-programs.bin",
-                                           "romfs-patches/manifest.tsv", "exefs/main",
+                                           "aoc-index.bin", "aoc-1/aoc-index.bin", "aoc-1/romfs.bin",
+                                           "seed-answers.bin", "seed-programs.bin", "shader-answers.bin",
+                                           "shader-programs.bin", "romfs-patches/manifest.tsv", "exefs/main",
                                            "exefs/sdk", "romfs/romfs.bin"])
-        self.assertEqual([event[0] for event in events].count("stage"), 14)
+        self.assertEqual([event[0] for event in events].count("stage"), 15)
         self.assertIn("copy-bytes", [event[0] for event in events])
         self.assertEqual(events[-1][0], "publish")
         self.assertTrue(all(not Path(event[3]).is_absolute() for event in events if event[3]))
@@ -412,6 +413,48 @@ class LocalBuildTest(unittest.TestCase):
             install_local_build(self.source, self.dest, game_data_dir=self.game_data)
         self.assertFalse(self.dest.exists())
 
+    def test_rejects_unrecognized_bin_inside_aoc_or_other_subdir(self):
+        for bad in ("aoc-1/unknown.bin", "other/aoc-index.bin"):
+            with self.subTest(path=bad):
+                self.write_build(files=["app.exe", bad])
+                with self.assertRaisesRegex(LocalBuildError, "unrecognized binary"):
+                    install_local_build(self.source, self.dest, game_data_dir=self.game_data)
+                self.assertFalse(self.dest.exists())
+
+    def test_updates_existing_install_when_new_build_adds_new_subfolder(self):
+        self.write_build(files=["app.exe", "romfs-index.bin"])
+        install_local_build(self.source, self.dest, game_data_dir=self.game_data)
+        (self.dest / "settings.ini").write_text("private setting", encoding="utf-8")
+        (self.dest / "profile").mkdir()
+        (self.dest / "profile/save.dat").write_bytes(b"private save")
+
+        self.write_build(port_version="0.2.0",
+                         files=["app.exe", "romfs-index.bin", "aoc-1/aoc-index.bin", "aoc-1/romfs.bin"])
+        result = install_local_build(self.source, self.dest, game_data_dir=self.game_data)
+
+        self.assertTrue((self.dest / "aoc-1/aoc-index.bin").is_file())
+        self.assertTrue((self.dest / "aoc-1/romfs.bin").is_file())
+        self.assertEqual((self.dest / "settings.ini").read_text(encoding="utf-8"), "private setting")
+        self.assertEqual((self.dest / "profile/save.dat").read_bytes(), b"private save")
+        marker = json.loads(result.marker.read_text(encoding="utf-8"))
+        self.assertIn("aoc-1/aoc-index.bin", marker["files"])
+        self.assertIn("aoc-1/romfs.bin", marker["files"])
+
+    def test_is_reparse_allows_windows_cloud_sync_tag_but_rejects_symlinks_and_junctions(self):
+        import stat
+        from types import SimpleNamespace
+        from installer.local_build import _is_reparse
+
+        dir_mode = stat.S_IFDIR | 0o755
+        self.assertFalse(_is_reparse(SimpleNamespace(st_mode=dir_mode, st_file_attributes=0x410, st_reparse_tag=0x9000001A)))
+        self.assertFalse(_is_reparse(SimpleNamespace(st_mode=dir_mode, st_file_attributes=0x410, st_reparse_tag=0x9000301A)))
+        self.assertFalse(_is_reparse(SimpleNamespace(st_mode=dir_mode, st_file_attributes=0x410, st_reparse_tag=0x80000021)))
+        self.assertTrue(_is_reparse(SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_file_attributes=0, st_reparse_tag=0)))
+        self.assertTrue(_is_reparse(SimpleNamespace(st_mode=dir_mode, st_file_attributes=0x410, st_reparse_tag=0xA000000C)))
+        self.assertTrue(_is_reparse(SimpleNamespace(st_mode=dir_mode, st_file_attributes=0x410, st_reparse_tag=0xA0000003)))
+        self.assertTrue(_is_reparse(SimpleNamespace(st_mode=dir_mode, st_file_attributes=0x410, st_reparse_tag=0x8000001B)))
+        self.assertTrue(_is_reparse(SimpleNamespace(st_mode=dir_mode, st_file_attributes=0x410, st_reparse_tag=0)))
+
     def test_rejects_user_data_screenshots_caches_build_files_archives_and_roms(self):
         blocked = (
             "settings.ini", "profile/save.dat", "saves/save.dat", "screenshots/test.png",
@@ -438,7 +481,8 @@ class LocalBuildTest(unittest.TestCase):
         install_local_build(self.source, self.dest, game_data_dir=self.game_data)
         original_files = {p: (self.dest / p).read_bytes()
                           for p in ("app.exe", "runtime/SDL3.dll", "launcher_icon.png", "romfs-index.bin",
-                                    "aoc-1/romfs.bin", "exefs/main", "exefs/sdk", "romfs/romfs.bin")}
+                                    "aoc-1/aoc-index.bin", "aoc-1/romfs.bin", "exefs/main", "exefs/sdk",
+                                    "romfs/romfs.bin")}
         marker_path = self.dest / MARKER_NAME
         original_marker = marker_path.read_bytes()
         (self.game_data / "exefs/main").write_bytes(b"updated synthetic main")

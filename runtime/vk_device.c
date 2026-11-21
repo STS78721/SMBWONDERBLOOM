@@ -10,6 +10,7 @@
 #include "cfg.h"
 #include "host.h"
 #include "vk.h"
+#include "vk_loop_guard.h"
 #include "platform/platform.h"
 
 static VkCtx g_vk;
@@ -509,6 +510,7 @@ void vk_device_fault_report(VkResult r) {
     if (done) { plat_mutex_unlock(&lock); return; }
     done = 1;
     vk_crumbs_report();
+    vk_loop_guard_poll(0, 1);   // shaders that reached their loop cap, if any reported before the loss
     VkCtx *c = vk_ctx();
     if (c && c->vma) {   // how full each heap was: a fault under memory pressure reads differently
         VmaBudget b[VK_MAX_MEMORY_HEAPS];

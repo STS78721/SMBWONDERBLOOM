@@ -69,7 +69,8 @@ class LocalBuildManifestTest(unittest.TestCase):
             self.assertEqual(data["game_id"], "040015100B514001")
             self.assertEqual(data["game_title"], "Super Mario Bros. Wonder")
             self.assertEqual(data["game_version"], "1.0.0")
-            self.assertEqual(data["port_version"], "Alpha 0.1.0a")
+            expected_port_version = (ROOT / "VERSION").read_text(encoding="utf-8-sig").splitlines()[0].strip()
+            self.assertEqual(data["port_version"], expected_port_version)
             self.assertEqual(data["executable"], "smbw.exe")
             self.assertEqual(data["game_data"], {
                 "exefs_dir": "exefs",
@@ -99,6 +100,45 @@ class LocalBuildManifestTest(unittest.TestCase):
                                                       metadata, "test", "Test", "1.0.0")
             self.assertIsNone(result)
             self.assertFalse((build / "ns2-build-manifest.json").exists())
+
+    def test_generated_manifest_with_aoc_installs_via_local_build(self):
+        from installer.local_build import MARKER_NAME, install_local_build
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            game_root = root / "dump"
+            exefs = game_root / "exefs"
+            packed_romfs = game_root / "romfs_packed"
+            build = game_root / "build" / "smbw100"
+            dest = root / "installed"
+            exefs.mkdir(parents=True)
+            packed_romfs.mkdir(parents=True)
+            build.mkdir(parents=True)
+
+            (exefs / "main").write_bytes(b"synthetic main")
+            (packed_romfs / "romfs.bin").write_bytes(b"synthetic RomFS")
+            (build / "smbw.exe").write_bytes(b"synthetic exe")
+            (build / "romfs-index.bin").write_bytes(b"synthetic index")
+            addon = build / "aoc-1"
+            addon.mkdir()
+            (addon / "aoc-index.bin").write_bytes(b"synthetic aoc index")
+            (addon / "romfs.bin").write_bytes(b"synthetic aoc romfs")
+
+            metadata = {
+                "title_id": "040015100B514001",
+                "exefs_sha256": {"main": hashlib.sha256(b"synthetic main").hexdigest()},
+            }
+            port._write_local_build_manifest(
+                build, {"folder": game_root}, exefs, packed_romfs, metadata,
+                "smbw", "Super Mario Bros. Wonder", "1.0.0",
+            )
+            install_local_build(build, dest, game_data_dir=game_root)
+
+            self.assertEqual((dest / "aoc-1/aoc-index.bin").read_bytes(), b"synthetic aoc index")
+            self.assertEqual((dest / "aoc-1/romfs.bin").read_bytes(), b"synthetic aoc romfs")
+            marker = json.loads((dest / MARKER_NAME).read_text(encoding="utf-8"))
+            self.assertIn("aoc-1/aoc-index.bin", marker["files"])
+            self.assertIn("aoc-1/romfs.bin", marker["files"])
 
 
 if __name__ == "__main__":

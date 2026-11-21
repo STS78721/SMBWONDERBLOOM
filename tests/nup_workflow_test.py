@@ -330,6 +330,66 @@ class NupWorkflowTest(unittest.TestCase):
             (self.repo / "runtime/deps" / relative).mkdir(parents=True)
         self.assertTrue(workflow.is_setup_root(self.repo))
 
+    def test_folder_workflow_stages_loose_aoc_and_packs_into_workspace(self):
+        game, romfs = self.make_game_folder("romfs")
+        (romfs / "sample").write_bytes(b"synthetic asset")
+        addon_romfs = game / "aoc" / "1" / "romfs"
+        addon_romfs.mkdir(parents=True)
+        (addon_romfs / "dlc.bin").write_bytes(b"synthetic addon asset")
+
+        with patch("installer.nup_workflow.subprocess.Popen", FakeProcess), \
+             patch("installer.local_build.install_local_build", return_value="installed"):
+            workflow.run_folder_workflow(game, self.workspace, self.destination,
+                                         repo_root=self.repo, build_python=self.build_python)
+
+        dump = self.workspace / "dump"
+        pack_base, pack_addon, build = FakeProcess.commands
+        self.assertEqual(Path(pack_base[pack_base.index("--dir") + 1]), romfs)
+        self.assertEqual(Path(pack_base[pack_base.index("--out") + 1]), dump / "romfs_packed")
+        self.assertEqual(Path(pack_addon[pack_addon.index("--dir") + 1]), addon_romfs)
+        self.assertEqual(Path(pack_addon[pack_addon.index("--out") + 1]), dump / "aoc_packed" / "1")
+        self.assertTrue((dump / "aoc" / "1" / "romfs").is_dir())
+        self.assertEqual(build[2:4], ["port", "--folder"])
+        self.assertEqual({path.name for path in game.iterdir()}, {"exefs", "romfs", "aoc"})
+
+    def test_folder_workflow_reuses_prepacked_aoc_without_repacking(self):
+        game, romfs = self.make_game_folder("romfs_packed")
+        (romfs / "romfs.bin").write_bytes(b"synthetic packed asset")
+        (romfs / "index.json").write_bytes(b"{}")
+        aoc_packed = game / "aoc_packed" / "1"
+        aoc_packed.mkdir(parents=True)
+        (aoc_packed / "romfs.bin").write_bytes(b"synthetic packed aoc")
+        (aoc_packed / "index.json").write_bytes(b'{"files": []}')
+        (game / "aoc" / "1" / "romfs").mkdir(parents=True)
+
+        with patch("installer.nup_workflow.subprocess.Popen", FakeProcess), \
+             patch("installer.local_build.install_local_build", return_value="installed"):
+            workflow.run_folder_workflow(game, self.workspace, self.destination,
+                                         repo_root=self.repo, build_python=self.build_python)
+
+        dump = self.workspace / "dump"
+        self.assertEqual(len(FakeProcess.commands), 1)
+        self.assertIn("universal_ns2_to_pc.py", FakeProcess.commands[0][1])
+        self.assertEqual((dump / "aoc_packed" / "1" / "romfs.bin").read_bytes(), b"synthetic packed aoc")
+        self.assertEqual((dump / "aoc_packed" / "1" / "index.json").read_bytes(), b'{"files": []}')
+        self.assertTrue((dump / "aoc" / "1" / "romfs").is_dir())
+
+    def test_run_command_scrubs_host_python_env_vars(self):
+        FakeProcess.outputs = ["Lifting modules\nBUILD COMPLETE\n"]
+        with patch.dict(os.environ, {"PYTHONPATH": "C:\\bad-py", "PYTHONHOME": "C:\\bad-home"}), \
+             patch("installer.nup_workflow.subprocess.Popen", FakeProcess), \
+             patch("installer.local_build.install_local_build", return_value="installed"):
+            _, romfs = self.make_game_folder("romfs_packed")
+            (romfs / "romfs.bin").write_bytes(b"packed")
+            (romfs / "index.json").write_bytes(b"{}")
+            workflow.run_folder_workflow(romfs, self.workspace, self.destination,
+                                         repo_root=self.repo, build_python=self.build_python)
+
+        env = FakeProcess.options[0]["env"]
+        keys_upper = {k.upper() for k in env}
+        self.assertNotIn("PYTHONPATH", keys_upper)
+        self.assertNotIn("PYTHONHOME", keys_upper)
+
 
 if __name__ == "__main__":
     unittest.main()

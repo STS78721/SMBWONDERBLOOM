@@ -29,6 +29,7 @@
 #include "nvn_api.h"
 #include "vk.h"
 #include "vk_exec.h"
+#include "vk_loop_guard.h"
 #include "platform/platform.h"
 
 #define WEAK __attribute__((weak))
@@ -352,6 +353,7 @@ static void vk_be_present(const tex_t *t, const int crop[4], uint64_t at_ns) {
     if (!gfx_replay_async()) {
         uint64_t frame = __atomic_add_fetch(&gfx_counters.frames, 1, __ATOMIC_RELAXED);
         perf_present(frame);   // before vk_exec_frame_log, which resets the frame's exec counts the flight recorder reads
+        vk_loop_guard_poll(frame, 0);
         present_image(t, crop, at_ns, kern_now_ns(), frame, 0);
         return;
     }
@@ -367,6 +369,7 @@ static void vk_be_present(const tex_t *t, const int crop[4], uint64_t at_ns) {
     plat_mutex_unlock(&rl);
     uint64_t frame = ++game_frames;
     perf_present(frame);
+    vk_loop_guard_poll(frame, 0);
     if (frame % 1800 == 0) replay_log(frame, 0);
     ReplayItem it = {.kind = RI_PRESENT, .tex = t, .at = at_ns, .queued = kern_now_ns()};
     if (crop) {

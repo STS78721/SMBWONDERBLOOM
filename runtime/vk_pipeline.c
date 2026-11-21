@@ -53,6 +53,7 @@
 #include "platform/platform.h"
 #include "shader_ready.h"
 #include "tex.h"
+#include "vk_loop_guard.h"
 
 #define LOG_ONCE(...) do { static volatile int32_t once_; if (!plat_xchg32(&once_, 1)) rt_log(__VA_ARGS__); } while (0)
 
@@ -1416,23 +1417,191 @@ static uint32_t *spv_override(const uint32_t *w, uint64_t words, uint64_t *out_w
     return NULL;
 }
 
+// Rewrites GLSL.std.450 SAbs(5), SMin(39), and SMax(42) on 32-bit integer scalars and vectors into
+// explicit comparisons + OpSelect(0/-1 mask) + bitwise blend, avoiding an NVIDIA Blackwell shader compiler
+// bug where abs/smax/smin of a {0, -1} (or {-1, 0, +1}) select emits an invalid instruction pointer.
+static uint32_t *spirv_sabs_minmax(const uint32_t *w, uint64_t n, uint64_t *out_n) {
+    enum {
+        OP_EXT_INST_IMPORT = 11, OP_EXT_INST = 12, OP_TYPE_BOOL = 20, OP_TYPE_INT = 21,
+        OP_TYPE_VECTOR = 23, OP_CONSTANT = 43, OP_CONSTANT_COMPOSITE = 44, OP_CONSTANT_NULL = 46,
+        OP_FUNCTION = 54, OP_SNEGATE = 126, OP_SELECT = 169, OP_SGREATER_THAN = 173,
+        OP_SLESS_THAN = 177, OP_BITWISE_XOR = 198, OP_BITWISE_AND = 199,
+        EXT_SABS = 5, EXT_SMIN = 39, EXT_SMAX = 42
+    };
+    if (n < 5) return NULL;
+    uint32_t bound = w[3];
+    if (!bound || bound > (1u << 22)) return NULL;
+
+    uint8_t *i32 = calloc(bound, 1), *need_z = calloc(bound, 1), *need_m1 = calloc(bound, 1);
+    uint32_t *comps = calloc(bound, 4), *scalar_ty = calloc(bound, 4);
+    uint32_t *c_zero = calloc(bound, 4), *c_neg1 = calloc(bound, 4);
+    if (!i32 || !need_z || !need_m1 || !comps || !scalar_ty || !c_zero || !c_neg1) {
+        free(i32), free(need_z), free(need_m1), free(comps), free(scalar_ty), free(c_zero), free(c_neg1);
+        return NULL;
+    }
+
+    uint32_t glsl = 0, boolt[5] = {0}, newbool[5] = {0}, nb = bound;
+    uint8_t need_bool[5] = {0};
+    uint64_t fn_at = 0, extra = 0, hits = 0;
+    int ok = 1;
+
+    for (uint64_t i = 5; ok && i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > n) { ok = 0; break; }
+        const uint32_t *a = w + i + 1;
+        if (op == OP_EXT_INST_IMPORT && len >= 3 && a[0] < bound && !strcmp((const char *)(a + 1), "GLSL.std.450")) {
+            glsl = a[0];
+        } else if (op == OP_TYPE_BOOL && len == 2 && a[0] < bound) {
+            boolt[1] = a[0];
+        } else if (op == OP_TYPE_INT && len == 4 && a[0] < bound && a[1] == 32) {
+            i32[a[0]] = 1, comps[a[0]] = 1, scalar_ty[a[0]] = a[0];
+        } else if (op == OP_TYPE_VECTOR && len == 4 && a[0] < bound && a[1] < bound && a[2] >= 2 && a[2] <= 4) {
+            if (boolt[1] && a[1] == boolt[1]) boolt[a[2]] = a[0];
+            else if (i32[a[1]] && comps[a[1]] == 1) i32[a[0]] = 1, comps[a[0]] = a[2], scalar_ty[a[0]] = a[1];
+        } else if (op == OP_CONSTANT && len == 4 && a[0] < bound && a[1] < bound && i32[a[0]] && comps[a[0]] == 1) {
+            if (a[2] == 0 && !c_zero[a[0]]) c_zero[a[0]] = a[1];
+            else if (a[2] == 0xffffffffu && !c_neg1[a[0]]) c_neg1[a[0]] = a[1];
+        } else if (op == OP_CONSTANT_NULL && len == 3 && a[0] < bound && a[1] < bound && i32[a[0]]) {
+            if (!c_zero[a[0]]) c_zero[a[0]] = a[1];
+        } else if (op == OP_FUNCTION) {
+            if (!fn_at) fn_at = i;
+        } else if (op == OP_EXT_INST && glsl && len >= 6 && a[2] == glsl && a[0] < bound && i32[a[0]]) {
+            uint32_t ins = a[3], rty = a[0], c = comps[rty];
+            if ((ins == EXT_SABS && len == 6) || ((ins == EXT_SMIN || ins == EXT_SMAX) && len == 7)) {
+                need_bool[c] = 1;
+                need_z[rty] = 1, need_m1[rty] = 1;
+                extra += (ins == EXT_SABS) ? 24 : 19;
+                hits++;
+            }
+        }
+        i += len;
+    }
+
+    if (!ok || !fn_at || !hits) {
+        free(i32), free(need_z), free(need_m1), free(comps), free(scalar_ty), free(c_zero), free(c_neg1);
+        return NULL;
+    }
+
+    for (uint32_t c = 2; c <= 4; c++) if (need_bool[c]) need_bool[1] = 1;
+    for (uint32_t c = 1; c <= 4; c++) {
+        if (need_bool[c] && !boolt[c]) {
+            newbool[c] = boolt[c] = nb++;
+            extra += (c == 1) ? 2 : 4;
+        }
+    }
+    for (uint32_t t = 1; t < bound; t++) {
+        if (!i32[t]) continue;
+        uint32_t st = scalar_ty[t], c = comps[t];
+        if (need_z[t] && !c_zero[t]) {
+            c_zero[t] = nb++;
+            need_z[t] = (c == 1) ? 2 : 3;
+            extra += (c == 1) ? 4 : 3;
+        } else {
+            need_z[t] = 0;
+        }
+        if (need_m1[t] && !c_neg1[t]) {
+            if (!c_neg1[st]) { c_neg1[st] = nb++; extra += 4; }
+            if (c >= 2) { c_neg1[t] = nb++; extra += 3 + c; need_m1[t] = 3; }
+            else { need_m1[t] = 0; }
+        } else {
+            need_m1[t] = 0;
+        }
+    }
+
+    uint32_t *o = malloc((n + extra + 16) * 4);
+    if (!o) {
+        free(i32), free(need_z), free(need_m1), free(comps), free(scalar_ty), free(c_zero), free(c_neg1);
+        return NULL;
+    }
+
+    uint64_t p = 5;
+    memcpy(o, w, 5 * 4);
+    for (uint64_t i = 5; i < fn_at;) {
+        uint32_t len = w[i] >> 16;
+        memcpy(o + p, w + i, len * 4);
+        p += len, i += len;
+    }
+
+    if (newbool[1]) o[p++] = 2u << 16 | OP_TYPE_BOOL, o[p++] = newbool[1];
+    for (uint32_t c = 2; c <= 4; c++) {
+        if (newbool[c]) {
+            o[p++] = 4u << 16 | OP_TYPE_VECTOR, o[p++] = newbool[c], o[p++] = boolt[1], o[p++] = c;
+        }
+    }
+    for (uint32_t t = 1; t < bound; t++) {
+        if (need_z[t] == 2) {
+            o[p++] = 4u << 16 | OP_CONSTANT, o[p++] = t, o[p++] = c_zero[t], o[p++] = 0;
+        }
+        if (i32[t] && comps[t] == 1 && c_neg1[t] >= bound) {
+            o[p++] = 4u << 16 | OP_CONSTANT, o[p++] = t, o[p++] = c_neg1[t], o[p++] = 0xffffffffu;
+        }
+    }
+    for (uint32_t t = 1; t < bound; t++) {
+        if (need_z[t] == 3) {
+            o[p++] = 3u << 16 | OP_CONSTANT_NULL, o[p++] = t, o[p++] = c_zero[t];
+        }
+        if (need_m1[t] == 3) {
+            uint32_t c = comps[t], sc = c_neg1[scalar_ty[t]];
+            o[p++] = (3u + c) << 16 | OP_CONSTANT_COMPOSITE, o[p++] = t, o[p++] = c_neg1[t];
+            for (uint32_t k = 0; k < c; k++) o[p++] = sc;
+        }
+    }
+
+    for (uint64_t i = fn_at; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        const uint32_t *a = w + i + 1;
+        if (op == OP_EXT_INST && len >= 6 && a[2] == glsl && a[0] < bound && i32[a[0]] &&
+            ((a[3] == EXT_SABS && len == 6) || ((a[3] == EXT_SMIN || a[3] == EXT_SMAX) && len == 7))) {
+            uint32_t rty = a[0], rid = a[1], ins = a[3];
+            uint32_t bty = boolt[comps[rty]], cz = c_zero[rty], cm1 = c_neg1[rty];
+            if (ins == EXT_SABS) {
+                uint32_t x = a[4], neg = nb++, cmp = nb++, m = nb++, xnx = nb++, t = nb++;
+                o[p++] = 4u << 16 | OP_SNEGATE, o[p++] = rty, o[p++] = neg, o[p++] = x;
+                o[p++] = 5u << 16 | OP_SLESS_THAN, o[p++] = bty, o[p++] = cmp, o[p++] = x, o[p++] = cz;
+                o[p++] = 6u << 16 | OP_SELECT, o[p++] = rty, o[p++] = m, o[p++] = cmp, o[p++] = cm1, o[p++] = cz;
+                o[p++] = 5u << 16 | OP_BITWISE_XOR, o[p++] = rty, o[p++] = xnx, o[p++] = neg, o[p++] = x;
+                o[p++] = 5u << 16 | OP_BITWISE_AND, o[p++] = rty, o[p++] = t, o[p++] = xnx, o[p++] = m;
+                o[p++] = 5u << 16 | OP_BITWISE_XOR, o[p++] = rty, o[p++] = rid, o[p++] = x, o[p++] = t;
+            } else {
+                uint32_t x = a[4], y = a[5], cmp = nb++, m = nb++, xxy = nb++, t = nb++;
+                uint32_t cmp_op = (ins == EXT_SMAX) ? OP_SGREATER_THAN : OP_SLESS_THAN;
+                o[p++] = 5u << 16 | cmp_op, o[p++] = bty, o[p++] = cmp, o[p++] = x, o[p++] = y;
+                o[p++] = 6u << 16 | OP_SELECT, o[p++] = rty, o[p++] = m, o[p++] = cmp, o[p++] = cm1, o[p++] = cz;
+                o[p++] = 5u << 16 | OP_BITWISE_XOR, o[p++] = rty, o[p++] = xxy, o[p++] = x, o[p++] = y;
+                o[p++] = 5u << 16 | OP_BITWISE_AND, o[p++] = rty, o[p++] = t, o[p++] = xxy, o[p++] = m;
+                o[p++] = 5u << 16 | OP_BITWISE_XOR, o[p++] = rty, o[p++] = rid, o[p++] = y, o[p++] = t;
+            }
+        } else {
+            memcpy(o + p, w + i, len * 4);
+            p += len;
+        }
+        i += len;
+    }
+
+    o[3] = nb;
+    *out_n = p;
+    free(i32), free(need_z), free(need_m1), free(comps), free(scalar_ty), free(c_zero), free(c_neg1);
+    return o;
+}
+
 // DKB_FMZ=vertex|all (debug workaround for #75, off by default): NVIDIA's fused-multiply-zero rule (the DX9 rule, 0 * x = 0
 // even for Inf and NaN) for 32-bit float scalar and vector OpFMul and GLSL.std.450 Fma. Each such instruction
 //   r = a * b       becomes   t = a * b;     r = (a == 0 || b == 0) ? 0 : t
 //   r = fma(a,b,c)  becomes   t = fma(a,b,c); r = (a == 0 || b == 0) ? c : t
-// and keeps its original result id r, so decorations and uses stay valid. Only modules of the chosen stage (vertex, or
-// every stage) are rewritten. NULL when nothing is rewritten.
+// and keeps its original result id r on the select while retargeting NoContraction decorations to t.
 static uint32_t *spirv_fmz(const uint32_t *w, uint64_t n, int vertex_only, uint64_t *out_n, unsigned *n_mul, unsigned *n_fma) {
     enum { OP_EXT_INST_IMPORT = 11, OP_EXT_INST = 12, OP_TYPE_BOOL = 20, OP_FMUL = 133, OP_FORD_EQUAL = 180,
-           OP_LOGICAL_OR = 166, OP_SELECT = 169, EXT_FMA = 50 };
+           OP_LOGICAL_OR = 166, OP_SELECT = 169, EXT_FMA = 50,
+           OP_DECORATE = 71, DEC_NO_CONTRACTION = 42 };
     if (n < 5) return NULL;
     uint32_t bound = w[3], glsl = 0, model = ~0u, boolt[5] = {0}, nb = bound;
     uint32_t *comps = calloc(bound, 4), *f32 = calloc(bound, 4), *nullc = calloc(bound, 4), *need = calloc(bound, 4);
+    uint32_t *retarget = calloc(bound, 4);
     uint32_t *o = NULL;
     uint32_t need_bool[5] = {0}, newbool[5] = {0};
     uint64_t fn_at = 0, extra = 0;
     unsigned mul = 0, fma = 0;
-    int ok = comps && f32 && nullc && need;
+    int ok = comps && f32 && nullc && need && retarget;
     for (uint64_t i = 5; ok && i < n;) {
         uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
         if (!len || i + len > n) { ok = 0; break; }
@@ -1450,19 +1619,29 @@ static uint32_t *spirv_fmz(const uint32_t *w, uint64_t n, int vertex_only, uint6
         } else if ((op == OP_FMUL && len == 5) || (op == OP_EXT_INST && len == 8 && glsl && a[2] == glsl && a[3] == EXT_FMA)) {
             if (a[0] < bound && f32[a[0]]) {
                 need[a[0]] = 1, need_bool[comps[a[0]]] = 1;
+                if (a[1] < bound) retarget[a[1]] = 1;
                 if (op == OP_FMUL) mul++, extra += 21; else fma++, extra += 21;
             }
         }
         i += len;
     }
-    if (!ok || !fn_at || !(mul + fma)) { free(comps), free(f32), free(nullc), free(need); return NULL; }
+    if (!ok || !fn_at || !(mul + fma)) { free(comps), free(f32), free(nullc), free(need), free(retarget); return NULL; }
     for (int c = 2; c <= 4; c++) if (need_bool[c]) need_bool[1] = 1;
     for (int c = 1; c <= 4; c++) if (need_bool[c] && !boolt[c]) newbool[c] = boolt[c] = nb++, extra += c == 1 ? 2 : 4;
     for (uint32_t t = 1; t < bound; t++) if (need[t] && !nullc[t]) nullc[t] = nb++, need[t] = 2, extra += 3;
+    for (uint32_t r = 1; r < bound; r++) if (retarget[r]) retarget[r] = nb++;
     o = malloc((n + extra + 8 * 4) * 4);
-    if (!o) { free(comps), free(f32), free(nullc), free(need); return NULL; }
-    uint64_t p = 0;
-    memcpy(o, w, fn_at * 4), p = fn_at;
+    if (!o) { free(comps), free(f32), free(nullc), free(need), free(retarget); return NULL; }
+    uint64_t p = 5;
+    memcpy(o, w, 5 * 4);
+    for (uint64_t i = 5; i < fn_at;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        memcpy(o + p, w + i, len * 4);
+        if (op == OP_DECORATE && len == 3 && w[i + 2] == DEC_NO_CONTRACTION && w[i + 1] < bound && retarget[w[i + 1]])
+            o[p + 1] = retarget[w[i + 1]];
+        p += len;
+        i += len;
+    }
     for (int c = 1; c <= 4; c++) {
         if (!newbool[c]) continue;
         if (c == 1) o[p++] = 2u << 16 | OP_TYPE_BOOL, o[p++] = boolt[1];
@@ -1477,7 +1656,7 @@ static uint32_t *spirv_fmz(const uint32_t *w, uint64_t n, int vertex_only, uint6
         int is_mul = op == OP_FMUL && len == 5, is_fma = op == OP_EXT_INST && len == 8 && glsl && a[2] == glsl && a[3] == EXT_FMA;
         if ((is_mul || is_fma) && a[0] < bound && f32[a[0]]) {
             uint32_t T = a[0], r = a[1], x = a[is_mul ? 2 : 4], y = a[is_mul ? 3 : 5], B = boolt[comps[T]], N = nullc[T];
-            uint32_t t = nb++, za = nb++, zb = nb++, z = nb++;
+            uint32_t t = r < bound && retarget[r] ? retarget[r] : nb++, za = nb++, zb = nb++, z = nb++;
             if (is_mul) o[p++] = 5u << 16 | OP_FMUL, o[p++] = T, o[p++] = t, o[p++] = x, o[p++] = y;
             else o[p++] = 8u << 16 | OP_EXT_INST, o[p++] = T, o[p++] = t, o[p++] = glsl, o[p++] = EXT_FMA, o[p++] = x, o[p++] = y, o[p++] = a[6];
             o[p++] = 5u << 16 | OP_FORD_EQUAL, o[p++] = B, o[p++] = za, o[p++] = x, o[p++] = N;
@@ -1489,11 +1668,10 @@ static uint32_t *spirv_fmz(const uint32_t *w, uint64_t n, int vertex_only, uint6
         }
         i += len;
     }
-    memcpy(o, w, 5 * 4);
     o[3] = nb;
     *out_n = p;
     *n_mul = mul, *n_fma = fma;
-    free(comps), free(f32), free(nullc), free(need);
+    free(comps), free(f32), free(nullc), free(need), free(retarget);
     return o;
 }
 
@@ -1508,6 +1686,24 @@ static VkShaderModule make_module_linked(const GfxShader *src, const uint32_t *w
         fixed = layer;
         w = fixed;
         words = layer_n;
+    }
+    static int fix_sabs_minmax = -1;
+    int sabs_on = __atomic_load_n(&fix_sabs_minmax, __ATOMIC_RELAXED);
+    if (sabs_on < 0) {
+        const char *e = cfg_value("NS2_FIX_SABS_MINMAX");
+        if (!strcmp(e, "0")) sabs_on = 0;
+        else if (!strcmp(e, "1")) sabs_on = 1;
+        else {
+            VkCtx *c = vk_ctx();
+            sabs_on = c && c->props.vendorID == 0x10de;
+        }
+        __atomic_store_n(&fix_sabs_minmax, sabs_on, __ATOMIC_RELAXED);
+    }
+    uint32_t *sabs_fix = NULL;
+    if (sabs_on) {
+        uint64_t sabs_n = 0;
+        sabs_fix = spirv_sabs_minmax(w, words, &sabs_n);
+        if (sabs_fix) w = sabs_fix, words = sabs_n;
     }
     static int fmz_mode = -1;   // 0 off, 1 vertex stage only, 2 every stage
     if (fmz_mode < 0) {
@@ -1545,6 +1741,11 @@ static VkShaderModule make_module_linked(const GfxShader *src, const uint32_t *w
             rt_log("vk: FMZ rewrite %016llx mul=%u fma=%u", (unsigned long long)h, nm, nf);
         }
     }
+    // Loop guard (vk_loop_guard.c): a graphics loop ends at the cap instead of hanging the GPU. Before the dump and the
+    // override, so both see the module the driver gets.
+    uint64_t guard_n = 0;
+    uint32_t *guard = vk_loop_guard_module(src, w, words, &guard_n);
+    if (guard) w = guard, words = guard_n;
     spv_dump(w, words, src);
     uint64_t ov_n = 0;
     uint32_t *ov = spv_override(w, words, &ov_n);
@@ -1553,7 +1754,9 @@ static VkShaderModule make_module_linked(const GfxShader *src, const uint32_t *w
     VkShaderModule m = VK_NULL_HANDLE;
     VkResult r = vkCreateShaderModule(P.device, &ci, NULL, &m);
     free(ov);
+    free(guard);
     free(fmz);
+    free(sabs_fix);
     free(fixed);
     return r == VK_SUCCESS ? m : VK_NULL_HANDLE;
 }

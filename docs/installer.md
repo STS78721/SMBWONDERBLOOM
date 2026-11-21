@@ -2,7 +2,7 @@
 
 ## Super Mario Bros. Wonder 1.0.0
 
-The port label is **Alpha 0.1.0a**. These versions identify different things: **1.0.0** is the Wonder game version, and **Alpha 0.1.0a** is the port build version.
+The port label is **0.2.0**. These versions identify different things: **1.0.0** is the Wonder game version, and **0.2.0** is the port build version.
 
 The standalone Windows EXE includes the tools it needs to prepare your game. Your game files, keys, settings, saves and cover art stay on your PC.
 

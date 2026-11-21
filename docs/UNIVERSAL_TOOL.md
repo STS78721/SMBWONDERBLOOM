@@ -560,6 +560,77 @@ how any title's frame-rate controller is found.
 - Compiler PGO is separate. On MasterSword it measured no gain on top of the measured hot split, so measure before
   adopting it.
 
+### 4l. GPU hang mid-level: a shader loop that never ended (2026-11-21)
+
+**What happened:** on 2026-11-21 at 09:08, Wonder stopped about 8 minutes into play, in the middle of a level, on an
+RTX 5070 Ti. It was the local `smbw100` build, played by the user.
+- **The log:** one 15.3 s frame (`worst frame 24831`), then `vk: device lost` and
+  `FATAL: vkQueueSubmit2 ... failed (-4)`. VRAM was not the problem: 3.1 of 15.2 GB in use.
+- **The breadcrumbs:** the GPU had started a draw part of submission 148979 and never finished it.
+- **The driver's event:** Windows' System log has `nvlddmkm` event 153 at 09:08:28. That is exactly 10 s after the
+  hang began, and this PC's `TdrDelay` is 10. So the GPU was busy too long and Windows reset it (a TDR). It was not a
+  memory fault.
+
+**What was running:** the hang began with the first draws of a fragment shader translated 2.5 s earlier (shader-cache
+key `fce7fb25…`, written at 09:08:15.6; the hang started at about 09:08:18). It is one of about 180 lit-material shaders
+that loop over a per-tile light list:
+- the screen is split into 16 × 9 tiles;
+- the tile's light count is the raw 32-bit word at `tile * 256 + 8196` of constant bank 7;
+- the loop runs that many times per pixel.
+
+With real data the count is at most 16. If the word holds anything else, such as a float (1.0 is 1,065,353,216 as an
+integer), every pixel loops for seconds. Earlier siblings of this shader ran for 8 minutes without trouble, so the loop
+itself is fine. For this one draw, the word the runtime handed the shader was wrong.
+
+**What is not known yet:** why that word was wrong. The log has no record of the buffer contents. The candidates, to
+check when it happens again:
+- the uniform snapshot (`vk_usnap.c`) or a stale binding gave this draw another buffer's bytes;
+- the game bound a larger range than the light grid, and the draw read past it;
+- the light grid's writer is not ordered before this draw.
+
+**The fix: a loop guard for every title** (`runtime/spirv_loop_guard.c`, `runtime/vk_loop_guard.c`):
+- **The rewrite.** Every graphics module with a loop (not compute) counts loop-header passes per invocation. At 4096
+  passes, its loops leave through their merge blocks. A tile has at most 16 lights, and console hardware could not run
+  4096 passes per pixel inside a frame, so real play never reaches the cap.
+- **The report.** When the cap is reached, the shader adds itself to a small report buffer. It reaches the buffer
+  through a buffer device address that the support buffer carries at byte 1408 (`SUPPORT_BYTES` is now 1424). Each
+  present reads the buffer and logs:
+  `vk: loop guard: fragment shader <full shader-cache key> left its loops at the cap of 4096 passes: <n> invocations so far (present <frame>)`
+  If that line appears, the same draw would have hung the GPU. A device-lost report also prints what the guard saw.
+- **Settings.** `NS2_LOOP_GUARD=0` turns the guard off. `NS2_LOOP_GUARD=<n>` sets the cap; it is a test knob. A
+  different cap changes the SPIR-V, so the driver rebuilds those pipelines once.
+- **Cost of a new build:** the first boot rebuilds the pipelines of guarded modules once (driver-cache misses). After
+  that, play is unchanged (A/B below).
+
+**Checked:**
+- `tests/loop_guard_check.c` runs the rewrite over the build's whole shader cache. Of 25,514 modules, 5,504 have loops.
+  All 5,504 were rewritten with 5,919 loops guarded and none left unguarded. `spirv-val --target-env vulkan1.3` passes
+  5,503 of them. The remaining one fails the same way before the rewrite (a translator bug, `13a0ac37…`, a vector index
+  out of range).
+  - To build and run it: `clang -O2 -o <scratch>\loop_guard_check.exe tests\loop_guard_check.c runtime\spirv_loop_guard.c`,
+    then `loop_guard_check <build>\shader-cache <out dir>`.
+- A 120 s scripted run into the first level with `NS2_LOOP_GUARD=4`, on a temporary profile:
+  - the log named two fragment shaders that went past 4 passes, so the report path works end to end;
+  - 7,192 frames, 0 shader failures, 0 skipped draws, no fault.
+- A/B on the same route, guard at its default against `NS2_LOOP_GUARD=0`:
+
+  | | Guard on (4096) | Guard off |
+  |---|---|---|
+  | Frames in 120 s | 7,191 | 7,192 |
+  | Mean fps, first 60 s | 59.9 | 59.9 |
+  | Loop-guard trips | 0 | – |
+  | Shader failures / skipped draws | 0 / 0 | 0 / 0 |
+
+  - Frames over 25 ms (6 on, 65 off) are not a fair comparison. Each setting gives different SPIR-V, so each run met its
+    own driver-cache misses.
+  - GPU time per draw was not measured. The game is capped at 60 fps, well under what the GPU can do.
+
+**Still needs the user:** play the same level past the 8-minute point.
+- **If the log shows a `vk: loop guard:` line:** the guard caught the hang, and that line names the shader. Then find
+  why that draw's constant bank 7 is wrong (the candidates above). The guard prevents the crash; it does not fix the
+  data.
+- **If no line appears:** the hang did not come back on that play.
+
 ## 5. Self-correction: what the tool does on its own now
 
 ### 5a. The bring-up loop (`tools/bringup.py`, `universal_ns2_to_pc.py bringup` / after `port`)

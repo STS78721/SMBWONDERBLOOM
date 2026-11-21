@@ -322,8 +322,8 @@ def module_glue(layout, linked, hashes, paths, version, title_id=0x040074a01bf12
 def port_version():
     """Return the clean VERSION string shown in the launcher, Setup, and F1 menu."""
     path = ROOT / 'VERSION'
-    version = path.read_text(encoding='utf-8-sig').strip() if path.is_file() else 'Alpha 0.1.0a'
-    return version.splitlines()[0].strip() if version else 'Alpha 0.1.0a'
+    version = path.read_text(encoding='utf-8-sig').strip() if path.is_file() else '0.2.0'
+    return version.splitlines()[0].strip() if version else '0.2.0'
 
 
 def ninja_file(gen, out, mods, pool_depth, skip=(), prebuilt=False, runtime_lib=None, make_lib=False, is_mtf=False):
