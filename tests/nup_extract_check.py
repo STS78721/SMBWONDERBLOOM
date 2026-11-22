@@ -510,6 +510,55 @@ class ExtractNupTest(unittest.TestCase):
             self.assertFalse((self.dir / 'x').exists())
             shutil.rmtree(out_dir, ignore_errors=True)
 
+    def test_auto_prefers_switch2_base_over_switch1_base(self):
+        sw1_base = 0x010015100B514000
+        ns2_base = 0x040015100B514001
+        aoc_tid = 0x010015100B515001
+        raw = build([
+            (0, sw1_base, 0, {'exefs': {'main': b'sw1'}, 'romfs': {'ver.txt': b'sw1'}}),
+            (0, ns2_base, 0, {'exefs': {'main': b'ns2', 'subsdk0': b'sub2'}, 'romfs': {'ver.txt': b'ns2'}}),
+            (2, aoc_tid, 0, {'romfs': {'addon.bin': b'bellabel'}}),
+        ])
+        out_dir = self.dir / 'out_crossgen'
+        code, _, err = run(self.write(raw), '--out', out_dir, '--quiet')
+        self.assertEqual(code, 0, err)
+        self.assertEqual((out_dir / 'exefs' / 'main').read_bytes(), b'ns2')
+        self.assertEqual((out_dir / 'exefs' / 'subsdk0').read_bytes(), b'sub2')
+        self.assertEqual((out_dir / 'romfs' / 'ver.txt').read_bytes(), b'ns2')
+        self.assertEqual((out_dir / 'aoc' / '1' / 'romfs' / 'addon.bin').read_bytes(), b'bellabel')
+
+    def test_auto_prefers_switch2_base_over_switch1_base_and_switch1_update(self):
+        sw1_base = 0x010015100B514000
+        sw1_upd = 0x010015100B514800
+        ns2_base = 0x040015100B514001
+        raw = build([
+            (0, sw1_base, 0, {'exefs': {'main': b'sw1-base'}, 'romfs': {'ver.txt': b'sw1'}}),
+            (1, sw1_upd, 65536, {'exefs': {'main': b'sw1-upd'}, 'romfs': {'ver.txt': b'sw1-upd'}}),
+            (0, ns2_base, 0, {'exefs': {'main': b'ns2-base'}, 'romfs': {'ver.txt': b'ns2'}}),
+        ])
+        out_dir = self.dir / 'out_prefer_ns2_over_sw1_upd'
+        code, _, err = run(self.write(raw), '--out', out_dir, '--quiet')
+        self.assertEqual(code, 0, err)
+        self.assertEqual((out_dir / 'exefs' / 'main').read_bytes(), b'ns2-base')
+        self.assertEqual((out_dir / 'romfs' / 'ver.txt').read_bytes(), b'ns2')
+
+    def test_auto_overlays_switch2_update_over_switch2_base_in_crossgen_nup(self):
+        sw1_base = 0x010015100B514000
+        ns2_base = 0x040015100B514000
+        ns2_upd = 0x040015100B514800
+        raw = build([
+            (0, sw1_base, 0, {'exefs': {'main': b'sw1'}, 'romfs': {'ver.txt': b'sw1'}}),
+            (0, ns2_base, 0, {'exefs': {'main': b'ns2-base', 'subsdk0': b'sub2'}, 'romfs': {'base.bin': b'b', 'ver.txt': b'old'}}),
+            (1, ns2_upd, 65536, {'exefs': {'main': b'ns2-upd'}, 'romfs': {'ver.txt': b'new'}}),
+        ])
+        out_dir = self.dir / 'out_crossgen_overlay'
+        code, _, err = run(self.write(raw), '--out', out_dir, '--quiet')
+        self.assertEqual(code, 0, err)
+        self.assertEqual((out_dir / 'exefs' / 'main').read_bytes(), b'ns2-upd')
+        self.assertEqual((out_dir / 'exefs' / 'subsdk0').read_bytes(), b'sub2')
+        self.assertEqual((out_dir / 'romfs' / 'base.bin').read_bytes(), b'b')
+        self.assertEqual((out_dir / 'romfs' / 'ver.txt').read_bytes(), b'new')
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

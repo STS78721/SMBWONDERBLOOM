@@ -1318,7 +1318,7 @@ def _write_local_build_manifest(out_dir: Path, disc: dict, exefs: Path, romfs: P
         return None
 
     version_file = ROOT / "VERSION"
-    port_version = version_file.read_text(encoding="utf-8-sig").splitlines()[0].strip() if version_file.is_file() else "0.2.0"
+    port_version = version_file.read_text(encoding="utf-8-sig").splitlines()[0].strip() if version_file.is_file() else "0.2.1"
     manifest = {
         "schema": 1,
         "game_id": title_id,

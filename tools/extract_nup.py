@@ -66,6 +66,11 @@ def same_title_family(a, b):
     return base_title_id(a) == base_title_id(b)
 
 
+def is_ns2_title(title_id):
+    """Nintendo Switch 2 application / Switch 2 Edition program IDs carry the 0x0400 prefix."""
+    return (title_id >> 48) == 0x0400
+
+
 class Package:
     def __init__(self, index, rec):
         (self.title_id, self.root_dir, self.exefs_dir, self.romfs_dir, self.version, self.kind, self.flags,
@@ -427,16 +432,27 @@ def write_title_json(out, packages, addons=()):
 
 def pick(nup, which, title_id=None):
     if which == 'base':
-        for pkg in nup.packages:
-            if pkg.kind == 0 and (title_id is None or same_title_family(pkg.title_id, title_id)):
-                return pkg
-        raise NupError('no base package in the container (see --list)')
+        candidates = [p for p in nup.packages
+                      if p.kind == 0 and (title_id is None or same_title_family(p.title_id, title_id))]
+        if not candidates:
+            raise NupError('no base package in the container (see --list)')
+        if title_id is None:
+            ns2 = [p for p in candidates if is_ns2_title(p.title_id)]
+            pool = ns2 or candidates
+        else:
+            pool = candidates
+        return max(pool, key=lambda p: p.version)
     if which == 'update':
         best = [p for p in nup.packages
                 if p.kind == 1 and (title_id is None or same_title_family(p.title_id, title_id))]
         if not best:
             raise NupError('no update package in the container (see --list)')
-        return max(best, key=lambda p: p.version)
+        if title_id is None:
+            ns2 = [p for p in best if is_ns2_title(p.title_id)]
+            pool = ns2 or best
+        else:
+            pool = best
+        return max(pool, key=lambda p: p.version)
     try:
         return nup.packages[int(which)]
     except (ValueError, IndexError):
@@ -451,20 +467,29 @@ def packages_for_extract(nup, package_arg, overlay_update):
 
     Base and update title IDs are matched by application family (…000 / …800), not exact equality —
     otherwise a full base+update .nup is misclassified as update-only and unchanged ExeFS modules
-    such as subsdk0 never appear in the extract.
+    such as subsdk0 never appear in the extract. Cross-gen NUPs prefer Switch 2 (0x0400...) programs.
     """
     if package_arg == 'auto':
-        # The default: the newest the container holds. Base + newest update when it has an update for the base, the base
-        # alone when it has none, the update alone when it has no base. Add-on content is extracted beside it
-        # (addons_for_extract), so a build plays the updated game with its DLC without anyone choosing.
-        has_update = any(p.kind == 1 for p in nup.packages)
-        has_base = any(p.kind == 0 for p in nup.packages)
+        # The default: the newest Switch 2 program the container holds (falling back to Switch 1 when no
+        # 0x0400... program exists). Add-on content is extracted beside it regardless of 0100/0400 prefix.
+        prog_pkgs = [p for p in nup.packages if p.kind in (0, 1)]
+        ns2_pkgs = [p for p in prog_pkgs if is_ns2_title(p.title_id)]
+        active = ns2_pkgs or prog_pkgs
+        has_update = any(p.kind == 1 for p in active)
+        has_base = any(p.kind == 0 for p in active)
         if has_update:
-            overlay_update = True
-        elif has_base:
-            return [pick(nup, 'base')], 'base (the container has no update)'
-        else:
-            raise NupError('no base or update package in the container (see --list)')
+            update = max((p for p in active if p.kind == 1), key=lambda p: p.version)
+            bases = [p for p in active if p.kind == 0 and same_title_family(p.title_id, update.title_id)]
+            if not bases:
+                return [update], 'update-only (no matching base package in this .nup)'
+            family = base_title_id(update.title_id)
+            return [max(bases, key=lambda p: p.version), update], f'base+update overlay (title family {family:016x})'
+        if has_base:
+            base = max((p for p in active if p.kind == 0), key=lambda p: p.version)
+            reason = ('Switch 2 base (preferred over Switch 1 package)'
+                      if ns2_pkgs and len(ns2_pkgs) < len(prog_pkgs) else 'base (the container has no update)')
+            return [base], reason
+        raise NupError('no base or update package in the container (see --list)')
     if overlay_update:
         update = pick(nup, 'update')
         try:

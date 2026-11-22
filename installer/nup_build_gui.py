@@ -551,6 +551,7 @@ class NupWorkflowWizard:
             'install': 'Choose an empty folder or the folder where this game is already installed.',
         }
         hint = ('You can go back and start again.' if cancelled else
+                self.failure_message if self.failure_phase == 'validate' and 'Switch 2 Edition' in self.failure_message else
                 hints.get(self.failure_phase, 'Go back to check your choices, then try again.'))
         self._draw_text(x, y + 92 * s, hint, size=18 * s, color=MUTED, width=width)
         if self.workspace is not None:
@@ -624,7 +625,7 @@ def selftest(shots: Path | None = None) -> int:
         app.destination_var.set(r'D:\Games\Wonder')
         app.progress = WorkflowProgress('extract', 'progress', 42, 100, 'files')
         app.result = SimpleNamespace(install_result=SimpleNamespace(
-            game_title='Super Mario Bros. Wonder', game_version='1.0.0', port_version='0.2.0'))
+            game_title='Super Mario Bros. Wonder', game_version='1.0.0', port_version='0.2.1'))
         app.failure_phase = 'build'
         app.failure_message = 'Sample setup error.'
         if shots:

@@ -12,6 +12,7 @@ import queue
 import re
 import signal
 import stat
+import struct
 import subprocess
 import threading
 import time
@@ -144,6 +145,69 @@ _PORTABLE_FILES = ("python/python.exe", "llvm/bin/clang.exe", "bin/ninja.exe", "
 _PORTABLE_FOLDERS = ("runtime/deps/include", "runtime/deps/lib")
 _ROMFS_NAMES = ("romfs", "romfs_packed", "ExtractedRomFS")
 _EXEFS_FILE = re.compile(r"(?:main(?:\.npdm)?|sdk|rtld|subsdk[0-9]+)", re.IGNORECASE)
+_BASE_TITLE_ID_MASK = 0xFFFFFFFFFFFFE000
+_UNSUPPORTED_SWITCH1_EDITIONS = {
+    0x010015100B514000: ("Super Mario Bros. Wonder", "040015100B514001"),
+}
+
+
+def _check_title_id_supported(title_id: int | None) -> None:
+    if title_id is None:
+        return
+    info = _UNSUPPORTED_SWITCH1_EDITIONS.get(title_id & _BASE_TITLE_ID_MASK)
+    if info:
+        raise NupWorkflowError(
+            "validate",
+            f"This copy is the Nintendo Switch 1 version of {info[0]} ({title_id:016X}). "
+            f"Setup requires the Nintendo Switch 2 Edition ({info[1]}).",
+        )
+
+
+def _read_npdm_title_id(exefs_dir: Path) -> int | None:
+    npdm = exefs_dir / "main.npdm"
+    try:
+        st = npdm.lstat()
+        if _is_reparse(st) or not stat.S_ISREG(st.st_mode) or st.st_size < 0x78:
+            return None
+        raw = npdm.read_bytes()
+    except OSError:
+        return None
+    if len(raw) < 0x78 or raw[:4] != b"META":
+        return None
+    off, _ = struct.unpack_from("<II", raw, 0x70)
+    if off + 0x18 <= len(raw) and raw[off:off + 4] == b"ACI0":
+        return struct.unpack_from("<Q", raw, off + 0x10)[0]
+    return None
+
+
+def _check_nup_edition(source: Path) -> None:
+    try:
+        file_size = source.lstat().st_size
+        with source.open("rb") as stream:
+            sb = stream.read(0x80)
+            if len(sb) < 0x80 or sb[:4] != b"NUP\x01":
+                return
+            _, _, toc_offset, toc_size, _, _, _, package_count, _ = struct.unpack_from("<HHQQ32sQQII", sb, 4)
+            if toc_offset < 0x80 or toc_size < 0x30 or toc_size > 64 * 1024 * 1024 or toc_offset + toc_size > file_size:
+                return
+            stream.seek(toc_offset)
+            toc = stream.read(toc_size)
+    except OSError:
+        return
+    if len(toc) < 0x30:
+        return
+    magic, count = struct.unpack_from("<II", toc, 0)
+    if magic != 0x01434F54 or count != package_count or 0x30 + count * 64 > len(toc):
+        return
+    prog_titles: list[int] = []
+    for i in range(count):
+        title_id, _, _, _, _, kind = struct.unpack_from("<QIIIIB", toc, 0x30 + i * 64)
+        if kind in (0, 1):
+            prog_titles.append(title_id)
+    if any((tid >> 48) == 0x0400 for tid in prog_titles):
+        return
+    for tid in prog_titles:
+        _check_title_id_supported(tid)
 
 
 def _has_git_marker(root: Path) -> bool:
@@ -500,6 +564,7 @@ def run_nup_workflow(nup_path: str | os.PathLike[str],
     extractor = _path_without_reparse(extractor_python, "extractor Python executable")
     _require_file(extractor, "Extractor Python executable")
     inputs = _validate_inputs(repo_root, build_python, source, workspace, destination)
+    _check_nup_edition(source)
     _emit(progress_callback, WorkflowProgress("validate", "completed", message="Paths and tools validated"))
     _check_cancelled(cancel_event, "validate")
 
@@ -508,6 +573,7 @@ def run_nup_workflow(nup_path: str | os.PathLike[str],
                    str(inputs.source), "--out", str(dump_dir)]
     _run_command(extract_cmd, cwd=inputs.repo_root, phase="extract", inputs=inputs,
                  callback=progress_callback, cancel_event=cancel_event)
+    _check_title_id_supported(_read_npdm_title_id(dump_dir / "exefs"))
     return _build_and_install(inputs, dump_dir, progress_callback=progress_callback, cancel_event=cancel_event)
 
 
@@ -624,6 +690,7 @@ def run_folder_workflow(game_folder: str | os.PathLike[str],
     _emit(progress_callback, WorkflowProgress("validate", "started", message="Checking paths and tools"))
     source, exefs, romfs = _raw_paths(Path(game_folder))
     inputs = _validate_inputs(repo_root, build_python, source, workspace, destination)
+    _check_title_id_supported(_read_npdm_title_id(exefs))
     packer = _path_without_reparse(inputs.repo_root / "tools" / "dkb_pack_romfs.py", "RomFS preparation tool")
     _require_file(packer, "RomFS preparation tool")
     _emit(progress_callback, WorkflowProgress("validate", "completed", message="Paths and tools validated"))

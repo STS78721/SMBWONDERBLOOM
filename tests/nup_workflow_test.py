@@ -390,6 +390,72 @@ class NupWorkflowTest(unittest.TestCase):
         self.assertNotIn("PYTHONPATH", keys_upper)
         self.assertNotIn("PYTHONHOME", keys_upper)
 
+    def test_folder_workflow_rejects_switch1_wonder_immediately(self):
+        import struct
+
+        game, romfs = self.make_game_folder("romfs")
+        (romfs / "sample").write_bytes(b"synthetic asset")
+        npdm = bytearray(0x90)
+        npdm[0:4] = b"META"
+        struct.pack_into("<II", npdm, 0x70, 0x78, 0x18)
+        npdm[0x78:0x7C] = b"ACI0"
+        struct.pack_into("<Q", npdm, 0x88, 0x010015100B514000)
+        (game / "exefs" / "main.npdm").write_bytes(bytes(npdm))
+
+        with patch("installer.nup_workflow.subprocess.Popen", FakeProcess):
+            with self.assertRaises(workflow.NupWorkflowError) as caught:
+                workflow.run_folder_workflow(game, self.workspace, self.destination,
+                                             repo_root=self.repo, build_python=self.build_python)
+
+        self.assertEqual(caught.exception.phase, "validate")
+        self.assertIn("Switch 2 Edition", str(caught.exception))
+        self.assertIn("040015100B514001", str(caught.exception))
+        self.assertFalse(self.workspace.exists())
+        self.assertEqual(FakeProcess.commands, [])
+
+    def test_nup_workflow_rejects_switch1_only_wonder_nup_immediately(self):
+        from tests.nup_extract_check import build as build_nup
+
+        nup_bytes = build_nup([
+            (0, 0x010015100B514000, 0, {'exefs': {'main': b'sw1'}, 'romfs': {'a': b'1'}}),
+            (2, 0x010015100B515001, 0, {'romfs': {'b': b'2'}}),
+        ])
+        nup_path = self.root / "sw1-only.nup"
+        nup_path.write_bytes(nup_bytes)
+
+        with patch("installer.nup_workflow.subprocess.Popen", FakeProcess):
+            with self.assertRaises(workflow.NupWorkflowError) as caught:
+                workflow.run_nup_workflow(nup_path, self.workspace, self.destination,
+                                          repo_root=self.repo,
+                                          extractor_python=self.extractor_python,
+                                          build_python=self.build_python)
+
+        self.assertEqual(caught.exception.phase, "validate")
+        self.assertIn("Switch 2 Edition", str(caught.exception))
+        self.assertIn("040015100B514001", str(caught.exception))
+        self.assertFalse(self.workspace.exists())
+        self.assertEqual(FakeProcess.commands, [])
+
+    def test_nup_workflow_accepts_crossgen_nup_with_switch2_edition(self):
+        from tests.nup_extract_check import build as build_nup
+
+        nup_bytes = build_nup([
+            (0, 0x010015100B514000, 0, {'exefs': {'main': b'sw1'}, 'romfs': {'a': b'1'}}),
+            (0, 0x040015100B514001, 0, {'exefs': {'main': b'ns2'}, 'romfs': {'a': b'2'}}),
+        ])
+        nup_path = self.root / "crossgen.nup"
+        nup_path.write_bytes(nup_bytes)
+
+        with patch("installer.nup_workflow.subprocess.Popen", FakeProcess), \
+             patch("installer.local_build.install_local_build", return_value="installed"):
+            result = workflow.run_nup_workflow(nup_path, self.workspace, self.destination,
+                                               repo_root=self.repo,
+                                               extractor_python=self.extractor_python,
+                                               build_python=self.build_python)
+
+        self.assertEqual(result.install_result, "installed")
+        self.assertEqual(len(FakeProcess.commands), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

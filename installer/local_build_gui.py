@@ -870,7 +870,7 @@ def selftest(shots: Path | None = None) -> int:
         _capture(root, shots / 'welcome.png')
     app.source_var.set('<prepared game folder>')
     app.source_info = {'game_title': 'Super Mario Bros. Wonder', 'game_version': '1.0.0',
-                       'port_version': '0.2.0', 'game_id': 'sample'}
+                       'port_version': '0.2.1', 'game_id': 'sample'}
     app.game_data_paths = ('exefs/main', 'romfs_packed/romfs.bin')
     app.portable_game_data_paths = ('exefs/main', 'romfs/romfs.bin')
     app.source_error = ''

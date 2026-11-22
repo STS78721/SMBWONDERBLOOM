@@ -501,7 +501,22 @@ static void portable_paths(RtConfig *c) {
     *cut = 0;
     c->exefs = portable_path(exe, "TOTK_EXEFS", "exefs", "main.npdm", pp_exefs, sizeof pp_exefs, c->exefs);
     c->romfs = portable_path(exe, "TOTK_ROMFS", "romfs", "romfs.bin", pp_romfs, sizeof pp_romfs, c->romfs);
-    c->profile = portable_path(exe, "TOTK_PROFILE_DIR", "profile", NULL, pp_profile, sizeof pp_profile, c->profile);
+    // Portable/Setup installs keep saves beside the executable in <exe>/profile even before that folder exists,
+    // never falling back to a build-time temporary workspace path.
+    char marker[PLAT_PATH_MAX * 2 + 32];
+    snprintf(marker, sizeof marker, "%s/ns2-build-install.json", exe);
+    int portable_install = c->exefs == pp_exefs || c->romfs == pp_romfs || plat_file_exists(marker);
+    if (portable_install) {
+        const char *e = cfg_get("TOTK_PROFILE_DIR");
+        if (e && *e) {
+            c->profile = portable_path(exe, "TOTK_PROFILE_DIR", "profile", NULL, pp_profile, sizeof pp_profile, c->profile);
+        } else {
+            snprintf(pp_profile, sizeof pp_profile, "%s/profile", exe);
+            c->profile = pp_profile;
+        }
+    } else {
+        c->profile = portable_path(exe, "TOTK_PROFILE_DIR", "profile", NULL, pp_profile, sizeof pp_profile, c->profile);
+    }
 }
 
 int main(int argc, char **argv) {

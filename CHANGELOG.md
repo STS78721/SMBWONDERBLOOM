@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1 · 2026-11-22
+
+WonderBloom **0.2.1** fixes save folder placement on Setup installs, adds cross-gen Switch 2 selection for `.nup` containers, and warns immediately if a Switch 1 copy of Wonder is selected.
+
+### Fixed
+
+- Fixed saves and local account data on fresh Setup installs being written to the temporary `NS2 Setup Files ...` workspace instead of `<install folder>\profile`.
+- Preferred Switch 2 (`0400...`) packages automatically when extracting cross-gen `.nup` containers that include both Switch 1 and Switch 2 versions.
+- Added an immediate check in Setup that reports a clear error if a Switch 1 copy of Super Mario Bros. Wonder (`010015100B514000`) is selected instead of spending several minutes building an incompatible binary.
+
 ## 0.2.0 · 2026-11-21
 
 WonderBloom **0.2.0** promotes the Windows port from Alpha to a full release, resolving installer failures with add-on content and in-place updates alongside gameplay stability and display fixes.
